@@ -109,7 +109,7 @@ def get_json_schedule(from_date, to_date):
     return member_schedule_json
 
 
-def add_schedule_to_calendar(service, payload):
+def add_schedule_to_calendar(service, payload, events):
     """
     Given a JSON payload from Youfit, and the Google Calendar service, add each event to the calendar
     :param service:
@@ -123,57 +123,109 @@ def add_schedule_to_calendar(service, payload):
         start_time = PY_TIMEZONE.localize(start_time_dt).isoformat()
         end_time = PY_TIMEZONE.localize(end_time_dt).isoformat()
 
-        event = {
-            'summary': 'Trainer Session with ' + apt['employeeName'].split(' ')[0],
-            'description': EVENT_DESCRIPTION,
-            'start': {
-                'dateTime': start_time,
-                'timeZone': TIMEZONE,
-            },
-            'end': {
-                'dateTime': end_time,
-                'timeZone': TIMEZONE,
-            },
-            "reminders": {
-                "useDefault": True
+        if not is_youfit_event_in_google_cal_events(apt, events):
+            event = {
+                'summary': 'Trainer Session with ' + apt['employeeName'].split(' ')[0],
+                'description': EVENT_DESCRIPTION,
+                'start': {
+                    'dateTime': start_time,
+                    'timeZone': TIMEZONE,
+                },
+                'end': {
+                    'dateTime': end_time,
+                    'timeZone': TIMEZONE,
+                },
+                "reminders": {
+                    "useDefault": True
+                }
             }
-        }
 
-        # event_check = {
-        #     'timeMin': start_time,
-        #     'timeMax': end_time,
-        #     'timeZone': timezone,
-        #     'items': [
-        #         {
-        #             "id": 'primary'
-        #         }
-        #     ]
-        # }
-        # Check if event is already in calendar
-        # freebusy_query_result = service.freebusy().query(body=event_check).execute()
-        # if len(freebusy_query_result['calendars']['primary']['busy']) > 0:
-        #     # Skip if event already in calendar
-        #     print("Event skipped {} - {}!".format(start_time, end_time))
-        #     continue
-
-        # Create an event
-        event_created_result = service.events().insert(calendarId='primary', body=event).execute()
-        print('Event created: %s' % (event_created_result.get('htmlLink')))
+            # Create an event
+            event_created_result = service.events().insert(calendarId='primary', body=event).execute()
+            print('Event created: %s' % (event_created_result.get('htmlLink')))
 
 
-def delete_existing_calendar_events(service, to_date):
+def is_youfit_event_in_google_cal_events(youfit_event, google_cal_events):
+    """
+    Given a youfit formatted dict, return true if its found within a list of google calendar events
+    :param youfit_event:
+    :param google_cal_events:
+    :return:
+    """
+    start_time_dt = datetime.strptime("{} {}".format(youfit_event['eventDate'], youfit_event['eventStartTime']),
+                                      '%m/%d/%Y %I:%M %p')
+    end_time_dt = datetime.strptime("{} {}".format(youfit_event['eventDate'], youfit_event['eventEndTime']),
+                                    '%m/%d/%Y %I:%M %p')
+    start_time = PY_TIMEZONE.localize(start_time_dt)
+    end_time = PY_TIMEZONE.localize(end_time_dt)
+
+    for google_event in google_cal_events['items']:
+        if start_time == datetime.fromisoformat(google_event['start']['dateTime']) and \
+                end_time == datetime.fromisoformat(google_event['end']['dateTime']):
+            return True
+
+    return False
+
+
+def is_google_cal_event_in_youfit_events(google_cal_event, list_of_youfit_events):
+    """
+    Given a google cal formatted dict, return true if its found within a list of youfit dict events
+    :param google_cal_event:
+    :param list_of_youfit_events:
+    :return:
+    """
+    for youfit_event in list_of_youfit_events:
+        start_time_dt = datetime.strptime("{} {}".format(youfit_event['eventDate'], youfit_event['eventStartTime']),
+                                          '%m/%d/%Y %I:%M %p')
+        end_time_dt = datetime.strptime("{} {}".format(youfit_event['eventDate'], youfit_event['eventEndTime']),
+                                        '%m/%d/%Y %I:%M %p')
+        start_time = PY_TIMEZONE.localize(start_time_dt)
+        end_time = PY_TIMEZONE.localize(end_time_dt)
+
+        if start_time == datetime.fromisoformat(google_cal_event['start']['dateTime']) and \
+                end_time == datetime.fromisoformat(google_cal_event['end']['dateTime']):
+            return True
+
+    return False
+
+
+def delete_existing_calendar_events(service, events, payload):
+    """
+    for the list of google calendar events for the x time period,
+    if you see an event that isnt in the list from youfit, delete it
+    :param service:
+    :param events:
+    :param payload:
+    :return:
+    """
+    for event in events['items']:
+        if 'description' in event and event['description'] == EVENT_DESCRIPTION:
+            if not is_google_cal_event_in_youfit_events(event, payload):
+                service.events().delete(calendarId='primary',
+                                        eventId=event['id']).execute()
+                print("Deleted event with id: {}".format(event['id']))
+            else:
+                print("Ignored event with id: {}".format(event['htmlLink']))
+
+
+def get_existing_calendar_events(service, from_date, to_date):
+    """
+    get google calendar events between a date period of from_date to to_date
+    :param service:
+    :param from_date:
+    :param to_date:
+    :return:
+    """
     to_datetime = datetime.combine(to_date, datetime.max.time())
     to_datetime.replace(tzinfo=PY_TIMEZONE)
 
-    events = service.events().list(calendarId='primary',
-                                   timeMin=datetime.utcnow().isoformat() + 'Z',
-                                   timeMax=to_datetime.isoformat() + '+00:00',
-                                   timeZone=TIMEZONE).execute()
-    for event in events['items']:
-        if 'description' in event and event['description'] == EVENT_DESCRIPTION:
-            service.events().delete(calendarId='primary',
-                                    eventId=event['id']).execute()
-            print("Deleted event with id: {}".format(event['id']))
+    from_datetime = datetime.combine(from_date, datetime.min.time())
+    from_datetime.replace(tzinfo=PY_TIMEZONE)
+
+    return service.events().list(calendarId='primary',
+                                 timeMin=from_datetime.isoformat() + '+00:00',
+                                 timeMax=to_datetime.isoformat() + '+00:00',
+                                 timeZone=TIMEZONE).execute()
 
 
 def hawk():
@@ -187,8 +239,9 @@ def hawk():
 
     payload = get_json_schedule(last_sun, next_sat)
     service = build_calendar_service()
-    delete_existing_calendar_events(service, next_sat)
-    add_schedule_to_calendar(service, payload)
+    existing_events = get_existing_calendar_events(service, last_sun, next_sat)
+    delete_existing_calendar_events(service, existing_events, payload)
+    add_schedule_to_calendar(service, payload, existing_events)
 
 
 if __name__ == '__main__':
